@@ -1,0 +1,9 @@
+transformers
+opencv-python
+pillow
+torchvision
+numpy
+torch
+gradio
+captum
+grad-cam

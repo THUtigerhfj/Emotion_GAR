@@ -1,0 +1,6 @@
+.gradio
+data
+legacy
+models
+outputs
+__pycache__/

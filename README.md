@@ -55,6 +55,74 @@ Set up UI by running:
 python src/gradio_app.py
 ```
 
+### Expose Gradio with Cloudflare Tunnel
+
+If you want others to access your local Gradio service without renting a cloud server, use Cloudflare Tunnel.
+
+1. Start Gradio locally (this project machine):
+
+```bash
+# Linux/macOS
+export GRADIO_SERVER_NAME=0.0.0.0
+export GRADIO_SERVER_PORT=7860
+export GRADIO_QUEUE_MAX_SIZE=10
+export GRADIO_QUEUE_WORKERS=2
+export GRADIO_MAX_THREADS=16
+export GRADIO_SHARE=false
+export GRADIO_AUTH=admin:ChangeMeStrongPassword
+python src/gradio_app.py
+```
+
+```powershell
+# Windows PowerShell
+$env:GRADIO_SERVER_NAME="0.0.0.0"
+$env:GRADIO_SERVER_PORT="7860"
+$env:GRADIO_QUEUE_MAX_SIZE="10"
+$env:GRADIO_QUEUE_WORKERS="2"
+$env:GRADIO_MAX_THREADS="16"
+$env:GRADIO_SHARE="false"
+$env:GRADIO_AUTH="admin:ChangeMeStrongPassword"
+python src/gradio_app.py
+```
+
+1. Install `cloudflared` on the same machine.
+
+- Windows: download from Cloudflare official release page and add to `PATH`.
+- Linux: install from the `.deb`/`.rpm` package or official binary.
+
+1. Start a quick tunnel to your local Gradio port:
+
+```bash
+cloudflared tunnel --url http://localhost:7860
+```
+
+You will get a public URL like:
+
+```text
+https://xxxx.trycloudflare.com
+```
+
+1. Share that URL with users.
+
+1. Stability tips (important):
+
+- Prefer HTTP/2 for better cross-region stability:
+
+```bash
+cloudflared tunnel --url http://localhost:7860 --protocol http2
+```
+
+- Keep Gradio queue enabled to absorb burst requests.
+- Keep `GRADIO_QUEUE_WORKERS=2` (or reduce to `1` if GPU memory is tight).
+- Keep `GRADIO_AUTH` enabled once exposed publicly.
+
+1. Use two terminal sessions for long-running service:
+
+- Session 1: run Gradio (`python src/gradio_app.py`)
+- Session 2: run Cloudflare Tunnel (`cloudflared tunnel --url http://localhost:7860 --protocol http2`)
+
+On Linux servers, you can use `tmux` and keep one process per tmux pane/window.
+
 ### Mass Inference
 
 To run inference on a batch of images, run:
@@ -66,7 +134,6 @@ python src/observe_batch_inference.py --input_dir data/ --output_dir outputs/
 ### Output
 
 The output will be saved into the `outputs/` directory.
-
 
 ## Project Structure
 
@@ -95,7 +162,7 @@ We find that the Gradient Attention Rollout (by Jacob Gildenblat) works well for
 
 Actually, this phenomenon does not only happen to finetuned models. For more details, please refer to the paper "VISION TRANSFORMERS NEED REGISTERS".
 
-```
+```bibtex
 @misc{darcet2024visiontransformersneedregisters,
       title={Vision Transformers Need Registers}, 
       author={Timothée Darcet and Maxime Oquab and Julien Mairal and Piotr Bojanowski},

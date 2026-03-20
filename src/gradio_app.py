@@ -1,5 +1,4 @@
 import os
-import sys
 import threading
 from functools import lru_cache
 
@@ -14,6 +13,36 @@ from inference import VITAttentionGradRollout, enhance_rollout_mask, show_mask_o
 
 # Guard model execution to avoid race conditions / OOM under heavy concurrent traffic.
 INFERENCE_LOCK = threading.Lock()
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return max(int(value), minimum)
+    except ValueError:
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_auth(name: str = "GRADIO_AUTH"):
+    # Format: username:password
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    if ":" not in raw:
+        return None
+    user, pwd = raw.split(":", 1)
+    if not user or not pwd:
+        return None
+    return [(user, pwd)]
 
 
 @lru_cache(maxsize=1)
@@ -109,6 +138,22 @@ def build_ui():
 
 if __name__ == "__main__":
     app = build_ui()
-    # Queue incoming requests so the app remains stable under burst traffic.
-    app.queue(max_size=256, default_concurrency_limit=8)
-    app.launch(server_name="0.0.0.0", server_port=7860, share=True)
+
+    server_name = os.getenv("GRADIO_SERVER_NAME", "0.0.0.0")
+    server_port = _env_int("GRADIO_SERVER_PORT", 7860, minimum=1)
+    queue_size = _env_int("GRADIO_QUEUE_MAX_SIZE", 10, minimum=1)
+    queue_workers = _env_int("GRADIO_QUEUE_WORKERS", 1, minimum=1)
+    app_max_threads = _env_int("GRADIO_MAX_THREADS", 16, minimum=1)
+    share = _env_bool("GRADIO_SHARE", default=False)
+    auth = _env_auth("GRADIO_AUTH")
+
+    # Queue requests to smooth bursts and reduce crashes under multi-user traffic.
+    app.queue(max_size=queue_size, default_concurrency_limit=queue_workers)
+    app.launch(
+        server_name=server_name,
+        server_port=server_port,
+        share=share,
+        max_threads=app_max_threads,
+        show_api=False,
+        auth=auth,
+    )

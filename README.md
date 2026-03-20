@@ -66,10 +66,9 @@ If you want others to access your local Gradio service without renting a cloud s
 export GRADIO_SERVER_NAME=0.0.0.0
 export GRADIO_SERVER_PORT=7860
 export GRADIO_QUEUE_MAX_SIZE=10
-export GRADIO_QUEUE_WORKERS=2
+export GRADIO_QUEUE_WORKERS=1
 export GRADIO_MAX_THREADS=16
 export GRADIO_SHARE=false
-export GRADIO_AUTH=admin:ChangeMeStrongPassword
 python src/gradio_app.py
 ```
 
@@ -78,10 +77,9 @@ python src/gradio_app.py
 $env:GRADIO_SERVER_NAME="0.0.0.0"
 $env:GRADIO_SERVER_PORT="7860"
 $env:GRADIO_QUEUE_MAX_SIZE="10"
-$env:GRADIO_QUEUE_WORKERS="2"
+$env:GRADIO_QUEUE_WORKERS="1"
 $env:GRADIO_MAX_THREADS="16"
 $env:GRADIO_SHARE="false"
-$env:GRADIO_AUTH="admin:ChangeMeStrongPassword"
 python src/gradio_app.py
 ```
 
@@ -114,7 +112,6 @@ cloudflared tunnel --url http://localhost:7860 --protocol http2
 
 - Keep Gradio queue enabled to absorb burst requests.
 - Keep `GRADIO_QUEUE_WORKERS=2` (or reduce to `1` if GPU memory is tight).
-- Keep `GRADIO_AUTH` enabled once exposed publicly.
 
 1. Use two terminal sessions for long-running service:
 
@@ -122,6 +119,8 @@ cloudflared tunnel --url http://localhost:7860 --protocol http2
 - Session 2: run Cloudflare Tunnel (`cloudflared tunnel --url http://localhost:7860 --protocol http2`)
 
 On Linux servers, you can use `tmux` and keep one process per tmux pane/window.
+
+`conda info --base` gives you the base path, and before activate conda in tmux, run `source <conda_base_path>/etc/profile.d/conda.sh` to enable `conda activate` in tmux. e.g., `source /base/mambaforge/etc/profile.d/conda.sh`
 
 ### Mass Inference
 

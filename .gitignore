@@ -4,3 +4,4 @@ legacy
 models
 outputs
 __pycache__/
+cloudflared.deb

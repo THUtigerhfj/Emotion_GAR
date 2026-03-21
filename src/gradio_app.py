@@ -1,5 +1,7 @@
 import os
+import shutil
 import threading
+from collections import Counter
 from functools import lru_cache
 
 import gradio as gr
@@ -8,11 +10,40 @@ import torch
 from PIL import Image
 from transformers import AutoImageProcessor, ViTForImageClassification
 
-from inference import VITAttentionGradRollout, enhance_rollout_mask, show_mask_on_image
+from inference import (
+    VITAttentionGradRollout,
+    detect_and_crop_faces,
+    draw_face_boxes,
+    enhance_rollout_mask,
+    show_mask_on_image,
+)
 
 
 # Guard model execution to avoid race conditions / OOM under heavy concurrent traffic.
 INFERENCE_LOCK = threading.Lock()
+
+
+def _prepare_retinaface_local_weights():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(script_dir, ".."))
+    project_weight = os.path.join(project_root, "models", "retinaface", "retinaface.h5")
+
+    # DeepFace internally appends ".deepface" to DEEPFACE_HOME.
+    # If DEEPFACE_HOME already ends with ".deepface", normalize it to parent to avoid
+    # accidental nested paths like ".deepface/.deepface/weights".
+    deepface_home = os.getenv("DEEPFACE_HOME", project_root)
+    if os.path.basename(os.path.normpath(deepface_home)) == ".deepface":
+        deepface_home = os.path.dirname(os.path.normpath(deepface_home))
+
+    # Prefer project-local DeepFace cache so runtime is deterministic and portable.
+    os.environ["DEEPFACE_HOME"] = deepface_home
+    runtime_weight = os.path.join(deepface_home, ".deepface", "weights", "retinaface.h5")
+
+    if os.path.exists(project_weight) and not os.path.exists(runtime_weight):
+        os.makedirs(os.path.dirname(runtime_weight), exist_ok=True)
+        shutil.copy2(project_weight, runtime_weight)
+
+    return project_weight, runtime_weight
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -49,74 +80,127 @@ def load_runtime():
     )
     model.to(device)
     model.eval()
-    return device, processor, model
+
+    project_weight, runtime_weight = _prepare_retinaface_local_weights()
+    if not os.path.exists(runtime_weight):
+        raise FileNotFoundError(
+            "RetinaFace weights not found locally. "
+            "Run 'python src/download_model.py --retinaface-only' first, or place file at "
+            f"'{project_weight}'."
+        )
+
+    # Prime RetinaFace import once; weights are loaded lazily on first detect call.
+    from retinaface import RetinaFace
+
+    rollout = VITAttentionGradRollout(
+        model,
+        discard_ratio=0.2,
+        head_fusion="mean",
+        large_reweight="none",
+    )
+    return device, processor, model, rollout, RetinaFace
 
 
 def run_inference_ui(input_image):
     if input_image is None:
-        return None, "Please upload or drag an image first."
+        return None, [], "Please upload or drag an image first."
 
     try:
-        device, processor, model = load_runtime()
+        device, processor, model, rollout_generator, _ = load_runtime()
     except Exception as exc:
-        return None, f"Failed to load model: {exc}"
+        return None, [], f"Failed to load model/runtime: {exc}"
 
     raw_img = input_image.convert("RGB")
-    inputs = processor(images=raw_img, return_tensors="pt")
-    input_tensor = inputs["pixel_values"].to(device)
+
+    try:
+        detections, crops_rgb = detect_and_crop_faces(raw_img, expand_ratio=0.3)
+    except Exception as exc:
+        return None, [], f"RetinaFace detection failed: {exc}"
+
+    boxed = draw_face_boxes(raw_img, detections) if detections else np.asarray(raw_img, dtype=np.uint8)
+    boxed_image = Image.fromarray(boxed)
+
+    if not detections:
+        return boxed_image, [], "Detected faces: 0\n\nNo face found in the input image."
+
+    gallery_items = []
+    emotion_counter = Counter()
 
     with INFERENCE_LOCK:
-        with torch.no_grad():
-            outputs = model(input_tensor)
-            logits = outputs.logits
-            predicted_idx = logits.argmax(-1).item()
+        for idx, crop_rgb in enumerate(crops_rgb, start=1):
+            face_img = Image.fromarray(crop_rgb)
+            inputs = processor(images=face_img, return_tensors="pt")
+            input_tensor = inputs["pixel_values"].to(device)
 
-        predicted_emotion = model.config.id2label[predicted_idx]
+            with torch.no_grad():
+                outputs = model(input_tensor)
+                logits = outputs.logits
+                predicted_idx = logits.argmax(-1).item()
 
-        rollout_generator = VITAttentionGradRollout(model, discard_ratio=0.2, head_fusion="mean", large_reweight="none")
-        input_tensor.requires_grad = True
-        mask = rollout_generator(input_tensor, predicted_idx)
+            predicted_emotion = model.config.id2label[predicted_idx]
+            emotion_counter[predicted_emotion] += 1
 
-    img_resized = raw_img.resize((224, 224))
-    np_img_rgb = np.array(img_resized)
+            input_tensor.requires_grad = True
+            mask = rollout_generator(input_tensor, predicted_idx)
 
-    mask_resized = np.array(Image.fromarray(np.uint8(mask * 255)).resize((np_img_rgb.shape[1], np_img_rgb.shape[0]), Image.BILINEAR), dtype=np.float32) / 255.0
-    mask_resized = enhance_rollout_mask(mask_resized)
-    rollout_rgb = show_mask_on_image(np_img_rgb, mask_resized)
+            h, w = crop_rgb.shape[:2]
+            mask_resized = np.array(
+                Image.fromarray(np.uint8(mask * 255)).resize((w, h), Image.BILINEAR),
+                dtype=np.float32,
+            ) / 255.0
+            mask_resized = enhance_rollout_mask(mask_resized)
+            rollout_rgb = show_mask_on_image(crop_rgb, mask_resized)
 
-    result_text = f"Predicted emotion: {predicted_emotion.upper()} (Index: {predicted_idx})"
-    return Image.fromarray(rollout_rgb), result_text
+            gallery_items.append((Image.fromarray(crop_rgb), f"Face {idx}: Crop"))
+            gallery_items.append((Image.fromarray(rollout_rgb), f"Face {idx}: GAR | {predicted_emotion.upper()}"))
+
+    total_faces = len(crops_rgb)
+    summary_lines = [f"Detected faces: {total_faces}", "", "Emotion distribution:"]
+    for emotion, count in emotion_counter.most_common():
+        pct = (count / total_faces) * 100.0
+        summary_lines.append(f"- {emotion.upper()}: {count}/{total_faces} ({pct:.1f}%)")
+
+    return boxed_image, gallery_items, "\n".join(summary_lines)
 
 
 def build_ui():
     with gr.Blocks(title="Emotion Grad Rollout") as demo:
-        gr.Markdown("## Emotion Prediction + Attention Rollout")
+        gr.Markdown("## Multi-Face Emotion + GAR")
+        gr.Markdown("Upload one image. The app detects all faces, expands each box by 30%, and runs emotion + GAR per face.")
 
-        with gr.Row():
-            input_image = gr.Image(
-                type="pil",
-                label="Input Image (Drag or Upload)",
-                height=360,
-            )
-            output_image = gr.Image(
-                type="pil",
-                label="Attention Rollout",
-                height=360,
-            )
+        input_image = gr.Image(
+            type="pil",
+            label="Input Image",
+            height=420,
+        )
 
-        with gr.Row():
-            run_button = gr.Button("Process", variant="primary", scale=1)
+        run_button = gr.Button("Detect + Analyze", variant="primary")
+
+        detection_image = gr.Image(
+            type="pil",
+            label="RetinaFace Detection (Green: raw box, Yellow: expanded crop box)",
+            height=420,
+        )
+
+        with gr.Accordion("Per-face outputs (scrollable)", open=False):
+            per_face_gallery = gr.Gallery(
+                label="Pairs: [Crop] and [GAR + Prediction]",
+                columns=2,
+                object_fit="contain",
+                height=500,
+                preview=False,
+            )
 
         prediction_text = gr.Textbox(
-            label="Prediction",
+            label="Summary",
             interactive=False,
-            lines=1,
+            lines=8,
         )
 
         run_button.click(
             fn=run_inference_ui,
             inputs=[input_image],
-            outputs=[output_image, prediction_text],
+            outputs=[detection_image, per_face_gallery, prediction_text],
             concurrency_limit=1,
         )
 

@@ -5,3 +5,6 @@ models
 outputs
 __pycache__/
 cloudflared.deb
+retinaface.md
+.deepface
+cloudflared-linux-amd64.deb

@@ -8,6 +8,93 @@ from PIL import Image
 from transformers import AutoImageProcessor, ViTForImageClassification
 
 
+def _parse_retinaface_bbox(face_data):
+    """Extract [x1, y1, x2, y2] bbox from RetinaFace response entry."""
+    if isinstance(face_data, dict):
+        if "facial_area" in face_data and len(face_data["facial_area"]) >= 4:
+            box = face_data["facial_area"]
+            return int(box[0]), int(box[1]), int(box[2]), int(box[3])
+        if "bbox" in face_data and len(face_data["bbox"]) >= 4:
+            box = face_data["bbox"]
+            return int(box[0]), int(box[1]), int(box[2]), int(box[3])
+    if isinstance(face_data, (list, tuple)) and len(face_data) >= 4:
+        return int(face_data[0]), int(face_data[1]), int(face_data[2]), int(face_data[3])
+    return None
+
+
+def detect_and_crop_faces(image_rgb, expand_ratio=0.3):
+    """Detect faces with RetinaFace and return expanded crops.
+
+    Returns:
+        detections: list of dicts with keys raw_bbox and expanded_bbox
+        crops_rgb: list of np.ndarray, one expanded crop per detection
+    """
+    if not (0.0 <= expand_ratio <= 1.0):
+        raise ValueError("expand_ratio must be between 0 and 1.")
+
+    from retinaface import RetinaFace
+
+    img = np.asarray(image_rgb, dtype=np.uint8)
+    h, w = img.shape[:2]
+    resp = RetinaFace.detect_faces(img)
+
+    if not isinstance(resp, dict) or len(resp) == 0:
+        return [], []
+
+    detections = []
+    crops_rgb = []
+    for _, face_data in resp.items():
+        parsed = _parse_retinaface_bbox(face_data)
+        if parsed is None:
+            continue
+        x1, y1, x2, y2 = parsed
+
+        bw = max(1, x2 - x1)
+        bh = max(1, y2 - y1)
+        expand_w = int(bw * expand_ratio)
+        expand_h = int(bh * expand_ratio)
+
+        ex1 = max(0, x1 - expand_w)
+        ey1 = max(0, y1 - expand_h)
+        ex2 = min(w, x2 + expand_w)
+        ey2 = min(h, y2 + expand_h)
+
+        if ex2 <= ex1 or ey2 <= ey1:
+            continue
+
+        crop = img[ey1:ey2, ex1:ex2].copy()
+        detections.append(
+            {
+                "raw_bbox": (x1, y1, x2, y2),
+                "expanded_bbox": (ex1, ey1, ex2, ey2),
+            }
+        )
+        crops_rgb.append(crop)
+
+    return detections, crops_rgb
+
+
+def draw_face_boxes(image_rgb, detections):
+    """Draw RetinaFace raw and expanded boxes for visualization."""
+    canvas = np.asarray(image_rgb, dtype=np.uint8).copy()
+    for idx, det in enumerate(detections, start=1):
+        x1, y1, x2, y2 = det["raw_bbox"]
+        ex1, ey1, ex2, ey2 = det["expanded_bbox"]
+        cv2.rectangle(canvas, (ex1, ey1), (ex2, ey2), (255, 196, 0), 2)
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(
+            canvas,
+            f"Face {idx}",
+            (ex1, max(12, ey1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 196, 0),
+            1,
+            cv2.LINE_AA,
+        )
+    return canvas
+
+
 def reweight_large_attention(x, method="sqrt", upper_quantile=0.95, power=0.5):
     """Compress only upper-tail large values while preserving smaller ones."""
     if method == "none":

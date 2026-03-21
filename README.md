@@ -9,23 +9,48 @@ The attention rollout produces a heatmap overlay showing the facial regions (e.g
 The project uses Python. Ensure you have installed the required dependencies:
 
 ```bash
-pip install -r requirements.txt
+# Linux only: install OpenCV runtime dependency once
+sudo apt-get update && sudo apt-get install -y libgl1
+
+# Activate your conda env first
+conda activate emotion
+
+# Install Python packages (example uses Tsinghua mirror)
+python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+If you already have `tensorflow==2.21.x`, make sure `tf-keras` is installed (it is included in `requirements.txt`):
+
+```bash
+python -m pip install tf-keras -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 *(Note: As specified, `torch` and `numpy` should already be available in the environment).*
 
+If you re-run dependency installation later, use the same command above. Do not install `cv2` directly (there is no package named `cv2` on PyPI).
+
 ## Setup
 
-First, download and assemble the local CLIP runtime once:
+First, download local model assets once:
 
 - Vision encoder: `tanganke/clip-vit-large-patch14_fer2013` (fine-tuned on FER2013)
 - Text branch + processor: `openai/clip-vit-large-patch14`
+- RetinaFace detector weights: `retinaface.h5`
 
 ```bash
 python src/download_model.py
 ```
 
 The script merges the fine-tuned vision encoder into the base CLIP model and stores everything in `models/clip_fer2013/` so you can run inferences entirely offline in the future.
+
+If your network cannot access GitHub release URLs, you can download RetinaFace weights only and provide a mirror URL:
+
+```bash
+export RETINAFACE_WEIGHTS_URL="https://your-mirror.example.com/retinaface.h5"
+python src/download_model.py --retinaface-only
+```
+
+After download, the script stores RetinaFace weights in `models/retinaface/retinaface.h5` and stages them to local DeepFace runtime cache, so Gradio does not need online download during inference.
 
 ## Usage
 
@@ -83,12 +108,24 @@ $env:GRADIO_SHARE="false"
 python src/gradio_app.py
 ```
 
-1. Install `cloudflared` on the same machine.
+1. Install `cloudflared` on the same machine where Gradio is running.
 
-- Windows: download from Cloudflare official release page and add to `PATH`.
-- Linux: install from the `.deb`/`.rpm` package or official binary.
+- Linux (recommended quick install):
 
-1. Start a quick tunnel to your local Gradio port:
+```bash
+wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+sudo dpkg -i cloudflared-linux-amd64.deb
+cloudflared --version
+```
+
+- Windows:
+: download from the Cloudflare official releases page, install it, then verify in PowerShell:
+
+```powershell
+cloudflared --version
+```
+
+1. Start a quick tunnel to your local Gradio port (run this in another terminal):
 
 ```bash
 cloudflared tunnel --url http://localhost:7860
@@ -154,6 +191,7 @@ The output will be saved into the `outputs/` directory.
 - [FER2013 Vision Encoder](https://huggingface.co/tanganke/clip-vit-large-patch14_fer2013) - By `tanganke`
 - [Base CLIP Model](https://huggingface.co/openai/clip-vit-large-patch14) - By `openai`
 - [vit-explain](https://github.com/jacobgil/vit-explain) - Original gradient rollout explanation method for PyTorch by Jacob Gildenblat. Modified for Hugging Face transformer layers and CUDA usage here.
+- [RetinaFace](https://github.com/serengil/retinaface) - Face detection model by Serengil.
 
 ## Problems & Future Work
 
